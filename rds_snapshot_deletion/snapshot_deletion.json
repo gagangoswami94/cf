@@ -1,0 +1,175 @@
+{
+	"AWSTemplateFormatVersion": "2010-09-09",
+	"Description": "Manual Snapshot deletion",
+	"Resources": {
+	  "iamroleSnapshotsRDS": {
+		"Type": "AWS::IAM::Role",
+		"Properties": {
+		  "Description": "IAM Role for Lambda to access and list RDS snapshots",
+		  "AssumeRolePolicyDocument": {
+			"Version": "2012-10-17",
+			"Statement": [
+			  {
+				"Effect": "Allow",
+				"Principal": {
+				  "Service": "lambda.amazonaws.com"
+				},
+				"Action": "sts:AssumeRole"
+			  }
+			]
+		  },
+		  "Policies": [
+			{
+			  "PolicyName": "inline_policy_snapshots_rds_cw_logs",
+			  "PolicyDocument": {
+				"Version": "2012-10-17",
+				"Statement": [
+				  {
+					"Effect": "Allow",
+					"Action": [
+					  "logs:CreateLogGroup",
+					  "logs:CreateLogStream",
+					  "logs:PutLogEvents"
+					],
+					"Resource": "arn:aws:logs:*:*:*"
+				  }
+				]
+			  }
+			},
+			{
+			  "PolicyName": "inline_policy_snapshots_rds",
+			  "PolicyDocument": {
+				"Version": "2012-10-17",
+				"Statement": [
+				  {
+					"Effect": "Allow",
+					"Action": [
+					  "rds:DescribeDBSnapshotAttributes",
+					  "rds:DeleteDBSnapshot",
+					  "rds:DescribeDBClusterSnapshotAttributes",
+					  "rds:RestoreDBClusterFromSnapshot",
+					  "rds:DescribeDBSnapshots",
+					  "rds:CopyDBSnapshot",
+					  "rds:CopyDBClusterSnapshot",
+					  "rds:ModifyDBSnapshot",
+					  "rds:DeleteDBClusterSnapshot",
+					  "rds:CreateDBSnapshot",
+					  "rds:RestoreDBInstanceFromDBSnapshot",
+					  "rds:DescribeDBClusterSnapshots",
+					  "rds:CreateDBClusterSnapshot",
+					  "rds:ModifyDBClusterSnapshotAttribute",
+					  "rds:ListTagsForResource",
+					  "rds:ModifyDBSnapshotAttribute"
+					],
+					"Resource": "*"
+				  }
+				]
+			  }
+			}
+		  ]
+		}
+	  },
+	  "lambdaDeleteOldRDS": {
+		"Type": "AWS::Lambda::Function",
+		"Description": "Lambda function to delete old snapshots",
+		"Properties": {
+		  "Code": {
+			"ZipFile": {
+			  "Fn::Join": [
+				"\n",
+				[
+				  "import json",
+				  "import boto3",
+				  "from datetime import datetime",
+				  "from datetime import timedelta",
+				  "import logging",
+				  "import time",
+				  "def lambda_handler(event, context):",
+				  "        client = boto3.client('rds')",
+				  "        now = datetime.now() - timedelta(days=30)   #change the retention days as per your requirement",
+				  "        date = now.strftime(\"%Y/%m/%d\")",
+				  "        format = '%Y/%m/%d' ",
+				  "        last_month = datetime.strptime(date, format)    # final date to compare the timestamp of snapshots with.",
+				  "        snapshots = client.describe_db_snapshots()",
+				  "        for i in snapshots['DBSnapshots']:",
+				  "            S_type = i['SnapshotType']",
+				  "            S_date= i['SnapshotCreateTime']       # Grabbing raw timestamp from RDS snapshots",
+				  "            snap= S_date.strftime(\"%Y/%m/%d\")",
+				  "            format = '%Y/%m/%d'",
+				  "            snapshot = datetime.strptime(snap, format)   # Setting the correct format and object type",
+				  "            # Now the final variables to compare are last_month and snapshot",
+				  "            if S_type == \"manual\": ",
+				  "                if snapshot < last_month:  #comparison",
+				  "                    ID = i['DBSnapshotIdentifier']",
+				  "                    client.delete_db_snapshot( DBSnapshotIdentifier=ID )",
+				  "                    print(\"snapshot time is {}\".format(snapshot)) ",
+				  "                    print(\"Time to compare is {}\".format(last_month)) ",
+				  "                    print(\"These RDS snapshots have been deleted {}\".format(ID)) "
+				]
+			  ]
+			}
+		  },
+		  "MemorySize": 512,
+		  "Description": "This function deletes 30 days old manual snapshots",
+		  "FunctionName": "RDSSnapshotDeletion",
+		  "Role": {
+			"Fn::GetAtt": [
+			  "iamroleSnapshotsRDS",
+			  "Arn"
+			]
+		  },
+		  "Runtime": "python3.7",
+		  "Handler": "index.lambda_handler",
+		  "Timeout": 300
+		}
+	  },
+	  "cwEventDeleteOldSnapshotsRDS": {
+		"Type": "AWS::Events::Rule",
+		"Properties": {
+		  "Name": "RDSDeleteSnapshotTrigger",
+		  "Description": "Triggers the RDS DeleteOld state machine in the destination account",
+		  "ScheduleExpression": {
+			"Fn::Join": [
+			  "",
+			  [
+				"cron(",
+				"0 8 * * ? *",
+				")"
+			  ]
+			]
+		  },
+		  "State": "ENABLED",
+		  "Targets": [
+			{
+			  "Arn": {
+				"Fn::GetAtt": [
+				  "lambdaDeleteOldRDS",
+				  "Arn"
+				]
+			  },
+			  "Id": "Target1"
+			}
+		  ]
+		}
+	  },
+	  "iamroleInvocation": {
+		"Type": "AWS::Lambda::Permission",
+		"Properties": {
+		  "FunctionName": {
+			"Fn::GetAtt": [
+			  "lambdaDeleteOldRDS",
+			  "Arn"
+			]
+		  },
+		  "Action": "lambda:InvokeFunction",
+		  "Principal": "events.amazonaws.com",
+		  "SourceArn": {
+			"Fn::GetAtt": [
+			  "cwEventDeleteOldSnapshotsRDS",
+			  "Arn"
+			]
+		  }
+		}
+	  }
+	}
+  }
